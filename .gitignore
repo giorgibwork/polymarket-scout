@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+state/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.csv
+
+# Never commit local secrets or operational logs
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+secrets/
+*.log

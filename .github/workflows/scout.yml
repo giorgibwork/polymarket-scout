@@ -1,0 +1,138 @@
+name: Polymarket Scout
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub scheduled runs are approximate and may be delayed during high load.
+    - cron: '*/30 * * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: polymarket-scout-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore most recent valid database artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p state
+          # Fail closed if the GitHub API cannot be queried. Do not silently
+          # create a fresh history because of a permissions or network failure.
+          RUN_IDS="$(gh api "repos/${GH_REPO}/actions/workflows/scout.yml/runs?status=completed&per_page=20" --jq '.workflow_runs[].id')"
+          RESTORED=false
+          if [ -n "$RUN_IDS" ]; then
+            while IFS= read -r PREVIOUS_RUN; do
+              [ -n "$PREVIOUS_RUN" ] || continue
+              CANDIDATE_DIR="$(mktemp -d "$RUNNER_TEMP/scout-state.XXXXXX")"
+              echo "Checking Scout state artifact from completed run ${PREVIOUS_RUN}"
+              if gh run download "$PREVIOUS_RUN" --repo "$GH_REPO" --name scout-state --dir "$CANDIDATE_DIR"; then
+                CANDIDATE_DB="$CANDIDATE_DIR/scout.sqlite3"
+                if [ -f "$CANDIDATE_DB" ] && python - "$CANDIDATE_DB" <<'PYDB'
+          import sqlite3, sys
+          path = sys.argv[1]
+          try:
+              conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+              check = conn.execute("PRAGMA quick_check").fetchone()[0]
+              tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+              conn.close()
+              required = {"app_meta", "paper_trades", "quote_snapshots", "scan_runs"}
+              if check != "ok" or not required.issubset(tables):
+                  raise SystemExit(1)
+          except Exception:
+              raise SystemExit(1)
+          PYDB
+                then
+                  cp "$CANDIDATE_DB" state/scout.sqlite3
+                  echo "Restored and validated SQLite state from run ${PREVIOUS_RUN}."
+                  RESTORED=true
+                  break
+                else
+                  echo "Artifact from run ${PREVIOUS_RUN} had no valid Scout database; trying an older run."
+                fi
+              else
+                echo "No downloadable scout-state artifact on run ${PREVIOUS_RUN}; trying an older run."
+              fi
+            done <<< "$RUN_IDS"
+            if [ "$RESTORED" != "true" ]; then
+              echo "ERROR: prior workflow runs exist, but none of the 20 most recent completed runs has a valid Scout database artifact." >&2
+              echo "Refusing to start a fresh database because that would silently reset history." >&2
+              exit 1
+            fi
+          else
+            echo "No completed prior runs; this is the initial state database."
+          fi
+
+      - name: Run self-test
+        run: python polymarket_scout.py self-test
+
+      - name: Scan public markets
+        id: scan
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -u polymarket_scout.py scan --db state/scout.sqlite3 2>&1 | tee state/scan.log
+
+      - name: Write run summary
+        if: always()
+        env:
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+        run: |
+          {
+            echo "## Polymarket Scout"
+            echo "- Scan step outcome: ${SCAN_OUTCOME:-unknown}"
+            echo "- Mode: public-data read-only scan; simulated paper ledger only"
+            echo "- Database persistence: validated SQLite artifact when the scan database exists"
+            echo
+            echo "### Recent scan output"
+            echo '```text'
+            if [ -f state/scan.log ]; then tail -n 35 state/scan.log; else echo "No scan log was produced (an earlier workflow step may have failed)."; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkpoint and validate SQLite state
+        if: always() && hashFiles('state/scout.sqlite3') != ''
+        run: |
+          python - <<'PYDB'
+          import sqlite3
+          path = "state/scout.sqlite3"
+          conn = sqlite3.connect(path)
+          conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+          result = conn.execute("PRAGMA quick_check").fetchone()[0]
+          conn.close()
+          if result != "ok":
+              raise SystemExit(f"SQLite integrity check failed: {result}")
+          print("SQLite checkpointed; integrity_check=ok")
+          PYDB
+
+      - name: Upload persistent Scout state
+        if: always() && hashFiles('state/scout.sqlite3') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-state
+          path: state/scout.sqlite3
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Mark scan failure
+        if: steps.scan.outcome == 'failure'
+        run: exit 1
