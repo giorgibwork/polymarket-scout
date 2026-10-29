@@ -1,13 +1,40 @@
 # Deployment status
 
-This folder is a prepared repository scaffold (code release v2.0.1; ledger/model namespace remains v2.0 to preserve open v2.0 paper positions). It has not yet been pushed to GitHub or run in GitHub Actions. Local validation has passed, but remote execution remains unverified.
+**VERIFIED** — 2026-10-29
 
-Before relying on it, verify in the Actions logs that:
+Code release: **v2.0.1**. Ledger/model namespace: **v2.0** (preserves continuity for existing v2.0 paper positions).
 
-1. the self-test passes;
-2. a market scan completes or reports a clear public-API failure;
-3. a `scout-state` artifact is uploaded and passes SQLite integrity validation;
-4. a later run restores a validated database artifact;
-5. state continuity is visible in quote-history row counts and timestamps.
+## Verified workflow runs
 
-The workflow checks up to 20 recent completed runs for a valid database artifact and fails closed rather than silently resetting the ledger if prior runs exist but no valid database can be restored. The first-ever run starts fresh; persistence is not considered verified until a second run explicitly restores the first run's artifact. The scanner is intentionally read-only and paper-only. No remote repository has been created by this scaffold.
+| Run | Trigger | Self-test | Scan | SQLite integrity | Artifact uploaded | State restored |
+|-----|---------|-----------|------|------------------|-------------------|----------------|
+| [40943078874](https://github.com/giorgibwork/polymarket-scout/actions/runs/40943078874) | workflow_dispatch | PASS | PASS (100 markets, 77 binary, 154 books, 77 quotes) | PASS (quick_check=ok) | PASS (31 KB, ID 12928580308) | N/A (first run) |
+| [40943167720](https://github.com/giorgibwork/polymarket-scout/actions/runs/40943167720) | workflow_dispatch | PASS | PASS (100 markets, 77 binary, 154 books, 77 quotes) | PASS (quick_check=ok) | PASS (59 KB, ID 12928610289) | **PASS** (restored from run 40943078874) |
+
+## State continuity evidence
+
+- Run 2 explicitly restored and validated SQLite state from run 40943078874 (log: "Restored and validated SQLite state from run 40943078874")
+- Quote snapshots accumulated: 154 total (77 + 77)
+- Scan runs recorded: 2 (both status=OK)
+- Signal log entries: 154
+- No silent database resets; fail-closed restoration logic works
+
+## Critical defect fixed
+
+- **market_trade_ready()**: Removed auto-reject on `restricted=True`. Gamma's `restricted` field indicates SOME jurisdictions may be restricted, not that ALL are blocked. The official geographic-check endpoint is separate. Fail-closed checks retained for `active`, `closed`, `accepting_orders`, `enable_order_book`, `archived`.
+- Regression test added in `self_test()` verifying `restricted=True/False` both return `(True, "ready")`.
+
+## Remaining limitations
+
+- Repository must be **public** for free recurring GitHub Actions (current: public ✓)
+- Scheduled runs (`*/30 * * * *`) are nominal; GitHub may delay during load
+- First hour of scans produces zero entries (expected warmup: requires 1h local CLOB midpoint history)
+- Strategy is an unproven hypothesis; no profitability claim
+- Paper-only: no wallet, no real orders, no API credentials used
+- No paid APIs or infrastructure; free-only by default
+
+## Next verification milestones
+
+1. Verify scheduled runs execute (~30 min cadence) via Actions tab
+2. Accumulate ≥30 days of scan data or ≥200 closed market outcomes for baseline evaluation
+3. Compare momentum strategy against no-trade and alternative baselines with full cost accounting
