@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub scheduled runs are approximate and may be delayed during high load.
-    - cron: '*/30 * * * *'
+    # Runs at minutes 0 and 30 of every hour (e.g., 20:00, 20:30, 21:00 UTC).
+    - cron: '0,30 * * * *'
 
 permissions:
   contents: read
